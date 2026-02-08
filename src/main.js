@@ -1,11 +1,10 @@
 /**
- * AI Pulse Dashboard — Main Application v3
+ * AI Pulse Dashboard — Main Application v3 (Modal Backend)
  * Cognisium Lab © 2026
  *
- * 8 sources, auto-refresh 5min, in-app article reading, categories, dismiss
+ * Daily Top 20 via Modal API
  */
 
-import { fetchAllSources, fetchArticleContent, SOURCES } from '../tools/feed-parser.js';
 import {
     getArticles,
     saveArticles,
@@ -21,7 +20,8 @@ import {
 } from '../tools/storage.js';
 
 // ─── Config ───
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const API_URL = import.meta.env.VITE_API_URL || '';
+const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours check (though backend runs daily)
 
 // ─── State ───
 const state = {
@@ -34,13 +34,7 @@ const state = {
     isLoading: false,
     currentModal: null,
     lastDismissed: null,
-    refreshTimer: null,
-    contentCache: new Map(), // cache fetched article content
 };
-
-// Source color map from registry
-const SOURCE_COLORS = {};
-SOURCES.forEach(s => { SOURCE_COLORS[s.name] = s.color; });
 
 // ─── DOM ───
 const $ = id => document.getElementById(id);
@@ -82,26 +76,43 @@ const DOM = {
 };
 
 // ═══════════════════════════════════════════════════════
-// DATA PIPELINE
+// DATA PIPELINE (MODAL API)
 // ═══════════════════════════════════════════════════════
 
 async function fetchAllFeeds() {
+    if (!API_URL || API_URL.includes('replace-me')) {
+        setStatus('Falta URL de API', 'error');
+        showToast('⚠️ Configura VITE_API_URL en .env');
+        return;
+    }
+
     state.isLoading = true;
     showLoading(true);
-    setStatus('Escaneando 8 fuentes…', 'loading');
+    setStatus('Conectando a Modal Cloud…', 'loading');
 
     try {
-        const allArticles = await fetchAllSources();
-        state.articles = saveArticles(allArticles);
+        const response = await fetch(API_URL);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const data = await response.json();
+        const newArticles = data.articles || [];
+        
+        // Merge with local state (preserves saved/read status)
+        state.articles = saveArticles(newArticles);
         setLastFetch();
 
         const sourceCount = getUniqueSources(state.articles.filter(a => !a.dismissed)).length;
         setStatus(`${sourceCount} fuentes activas`, 'online');
-        showToast(`🔄 ${allArticles.length} artículos de ${sourceCount} fuentes`);
+        showToast(`✅ ${newArticles.length} noticias actualizadas`);
+        
+        if (data.updatedAt) {
+            DOM.lastUpdated.textContent = `Actualizado: ${formatDate(data.updatedAt)}`;
+        }
     } catch (err) {
-        console.error('[Pipeline] Error:', err);
-        setStatus('Error al cargar', 'error');
+        console.error('[API] Fetch failed:', err);
+        setStatus('Error de conexión', 'error');
         state.articles = getArticles();
+        showToast('⚠️ Usando caché local (offline)');
     } finally {
         state.isLoading = false;
         showLoading(false);
@@ -121,16 +132,16 @@ function loadCached() {
 }
 
 /**
- * Start auto-refresh every 5 minutes
+ * Check for updates periodically
  */
 function startAutoRefresh() {
-    if (state.refreshTimer) clearInterval(state.refreshTimer);
-    state.refreshTimer = setInterval(async () => {
-        console.log('[AutoRefresh] ⏰ Refreshing feeds…');
-        setStatus('Actualizando…', 'loading');
-        await fetchAllFeeds();
-    }, REFRESH_INTERVAL_MS);
-    console.log(`[AutoRefresh] ⏰ Set to refresh every ${REFRESH_INTERVAL_MS / 60000} min`);
+    // Check every hour if we need refresh
+    setInterval(async () => {
+        if (needsRefresh(24)) {
+            console.log('[AutoRefresh] ⏰ Daily update check…');
+            await fetchAllFeeds();
+        }
+    }, 60 * 60 * 1000); 
 }
 
 // ═══════════════════════════════════════════════════════
@@ -232,10 +243,10 @@ function renderArticles() {
 
 function createCard(art, index) {
     const timeAgo = getTimeAgo(art.publishedAt);
-    const isNew = isWithin(art.publishedAt, 12);
+    const isNew = isWithin(art.publishedAt, 24);
     const isDismissedView = state.view === 'dismissed';
     const delay = Math.min(index * 35, 350);
-    const srcColor = SOURCE_COLORS[art.source] || '#00FF88';
+    const srcColor = art.sourceColor || '#00FF88';
 
     const catsHtml = (art.categories || []).slice(0, 3)
         .map(c => `<span class="article-card__cat-tag">${c}</span>`)
@@ -324,7 +335,7 @@ function renderSourceFilters() {
 
     DOM.sourceFilters.innerHTML = sources.map(src => `
     <button class="source-btn ${state.activeSource === src.name ? 'active' : ''}" data-source="${src.name}">
-      <span class="source-btn__dot" style="background:${SOURCE_COLORS[src.name] || '#00FF88'}"></span>
+      <span class="source-btn__dot" style="background:${src.icon ? (src.name === state.activeSource ? '#fff' : '#00FF88') : '#00FF88'}"></span>
       ${src.icon} ${src.name}
       <span class="source-btn__count">${src.count}</span>
     </button>
@@ -363,7 +374,7 @@ async function openModal(articleId) {
     state.currentModal = art;
     markAsRead(articleId);
 
-    const srcColor = SOURCE_COLORS[art.source] || '#00FF88';
+    const srcColor = art.sourceColor || '#00FF88';
     DOM.modalSource.textContent = `${art.sourceIcon} ${art.source}`;
     DOM.modalSource.style.borderColor = srcColor;
     DOM.modalSource.style.color = srcColor;
@@ -379,54 +390,22 @@ async function openModal(articleId) {
     // Save btn state
     updateModalSaveBtn(art.saved);
 
-    // Show modal immediately with existing content or loading
+    // Show modal
     DOM.modalOverlay.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
 
-    // If we already have rich content, show it
-    if (art.content && art.content.length > 100) {
+    // Content: provided by backend directly
+    if (art.content && art.content.length > 50) {
         DOM.modalContent.innerHTML = art.content;
     } else {
-        // Show loading indicator then fetch the full article
         DOM.modalContent.innerHTML = `
-      <div style="text-align:center;padding:32px 0;color:#555;">
-        <div style="display:inline-flex;gap:4px;margin-bottom:12px;">
-          <span style="width:4px;height:16px;background:#00FF88;border-radius:2px;animation:loaderBar 1s ease-in-out infinite;"></span>
-          <span style="width:4px;height:16px;background:#00FF88;border-radius:2px;animation:loaderBar 1s ease-in-out infinite 0.1s;"></span>
-          <span style="width:4px;height:16px;background:#00FF88;border-radius:2px;animation:loaderBar 1s ease-in-out infinite 0.2s;"></span>
-        </div>
-        <p style="font-size:12px;color:#555;">Cargando artículo completo…</p>
-      </div>
-    `;
-
-        // Check cache first
-        if (state.contentCache.has(art.url)) {
-            DOM.modalContent.innerHTML = state.contentCache.get(art.url);
-        } else {
-            try {
-                const fullContent = await fetchArticleContent(art.url);
-                state.contentCache.set(art.url, fullContent);
-
-                // Update article in state
-                art.content = fullContent;
-
-                // Only update if modal is still showing this article
-                if (state.currentModal?.id === articleId) {
-                    DOM.modalContent.innerHTML = fullContent;
-                }
-            } catch (err) {
-                if (state.currentModal?.id === articleId) {
-                    DOM.modalContent.innerHTML = `
-            <p style="color:#888;font-size:13px;line-height:1.7;">
-              ${art.summary || 'No se pudo cargar el contenido completo.'}
-            </p>
-            <p style="color:#555;font-size:12px;margin-top:12px;">
-              Usa el enlace inferior para leer el artículo original.
-            </p>
-          `;
-                }
-            }
-        }
+          <p style="color:#888;font-size:13px;line-height:1.7;">
+            ${art.summary || 'Resumen no disponible.'}
+          </p>
+          <p style="color:#555;font-size:12px;margin-top:12px;">
+            <a href="${art.url}" target="_blank" style="color:#00FF88;">Leer completo en la fuente original →</a>
+          </p>
+        `;
     }
 }
 
@@ -629,20 +608,17 @@ function escapeHtml(s) {
 // ═══════════════════════════════════════════════════════
 
 async function init() {
-    console.log('[AI Pulse] 🚀 v3 — 8 fuentes, auto-refresh 5min, lectura in-app');
+    console.log('[AI Pulse] 🚀 v4 Backend Modal');
     initEvents();
     loadCached();
 
-    if (needsRefresh(0.08) || state.articles.length === 0) { // 0.08h = ~5min
+    if (needsRefresh(24) || state.articles.length === 0) { // 24 hour cache
         await fetchAllFeeds();
     } else {
         renderLastUpdated();
     }
-
-    // Start auto-refresh every 5 minutes
+    
     startAutoRefresh();
-
-    console.log('[AI Pulse] ✅ Ready — Next refresh in 5 minutes');
 }
 
 init();
