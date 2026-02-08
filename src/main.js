@@ -20,7 +20,7 @@ import {
 } from '../tools/storage.js';
 
 // ─── Config ───
-const API_URL = import.meta.env.VITE_API_URL || '';
+const API_URL = 'https://joseegon424-dot--ai-pulse-news-get-news.modal.run';
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours check (though backend runs daily)
 
 // ─── State ───
@@ -93,10 +93,10 @@ async function fetchAllFeeds() {
     try {
         const response = await fetch(API_URL);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
+
         const data = await response.json();
         const newArticles = data.articles || [];
-        
+
         // Merge with local state (preserves saved/read status)
         state.articles = saveArticles(newArticles);
         setLastFetch();
@@ -104,7 +104,7 @@ async function fetchAllFeeds() {
         const sourceCount = getUniqueSources(state.articles.filter(a => !a.dismissed)).length;
         setStatus(`${sourceCount} fuentes activas`, 'online');
         showToast(`✅ ${newArticles.length} noticias actualizadas`);
-        
+
         if (data.updatedAt) {
             DOM.lastUpdated.textContent = `Actualizado: ${formatDate(data.updatedAt)}`;
         }
@@ -141,7 +141,7 @@ function startAutoRefresh() {
             console.log('[AutoRefresh] ⏰ Daily update check…');
             await fetchAllFeeds();
         }
-    }, 60 * 60 * 1000); 
+    }, 60 * 60 * 1000);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -617,7 +617,7 @@ async function init() {
     } else {
         renderLastUpdated();
     }
-    
+
     startAutoRefresh();
 }
 
